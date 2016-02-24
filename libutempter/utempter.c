@@ -32,21 +32,23 @@
 #include <pwd.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <utmp.h>
 
 #ifdef __GLIBC__
+# include <utmp.h>
 # include <pty.h>
 #elif defined(__FreeBSD__)
+# include <utmp.h>
 # include <libutil.h>
+#elif defined(__sun)
+# include <utmpx.h>
 #else
 # error Unsupported platform
-#endif /* __GLIBC__ || __FreeBSD__ */
+#endif /* __GLIBC__ || __FreeBSD__ || __sun */
 
 #define	DEV_PREFIX	"/dev/"
 #define	DEV_PREFIX_LEN	(sizeof(DEV_PREFIX)-1)
 
-static void __attribute__ ((__noreturn__))
-usage(void)
+static void __attribute__ ((__noreturn__)) usage(void)
 {
 #ifdef	UTEMPTER_DEBUG
 	fprintf(stderr, "Usage: utempter add [<host>]\n"
@@ -59,6 +61,7 @@ static void
 validate_device(const char *device)
 {
 	int     flags;
+
 	struct stat stb;
 
 	if (strncmp(device, DEV_PREFIX, DEV_PREFIX_LEN))
@@ -106,16 +109,20 @@ validate_device(const char *device)
 
 static int
 write_uwtmp_record(const char *user, const char *term, const char *host,
-#ifdef __GLIBC__
+#if defined(__GLIBC__) || defined(__sun)
 		   pid_t pid,
 #endif
 		   int add)
 {
+#if defined(__sun)
+	struct utmpx ut;
+#else
 	struct utmp ut;
+#endif
 	struct timeval tv;
 
-#ifdef __GLIBC__
-	size_t offset;
+#if defined(__GLIBC__) || defined(__sun)
+	size_t  offset;
 #endif
 
 	memset(&ut, 0, sizeof(ut));
@@ -128,10 +135,10 @@ write_uwtmp_record(const char *user, const char *term, const char *host,
 	if (host)
 		strncpy(ut.ut_host, host, sizeof(ut.ut_host));
 
-#ifdef __GLIBC__
+#if defined(__GLIBC__) || defined(__sun)
 
 	offset = (strlen(term) <= sizeof(ut.ut_id)) ? 0 :
-			strlen(term) - sizeof(ut.ut_id);
+		strlen(term) - sizeof(ut.ut_id);
 	strncpy(ut.ut_id, term + offset, sizeof(ut.ut_id));
 
 	if (add)
@@ -144,17 +151,28 @@ write_uwtmp_record(const char *user, const char *term, const char *host,
 	ut.ut_tv.tv_sec = tv.tv_sec;
 	ut.ut_tv.tv_usec = tv.tv_usec;
 
+#ifdef __sun
+	setutxent();
+	if (!pututxline(&ut))
+#else
 	setutent();
 	if (!pututline(&ut))
+#endif
 	{
 #ifdef	UTEMPTER_DEBUG
 		fprintf(stderr, "utempter: pututline: %s\n", strerror(errno));
 #endif
 		exit(EXIT_FAILURE);
 	}
+#ifdef __sun
+	endutxent();
+
+	(void) updwtmpx(_WTMPX_FILE, &ut);
+#else
 	endutent();
 
 	(void) updwtmp(_PATH_WTMP, &ut);
+#endif
 
 #elif defined(__FreeBSD__)
 
@@ -175,7 +193,7 @@ write_uwtmp_record(const char *user, const char *term, const char *host,
 		}
 	}
 
-#endif /* __GLIBC__ || __FreeBSD__ */
+#endif /* __GLIBC__ || __sun || __FreeBSD__ */
 
 #ifdef	UTEMPTER_DEBUG
 	fprintf(stderr,
@@ -189,8 +207,11 @@ int
 main(int argc, const char *argv[])
 {
 	const char *device, *host;
+
 	struct passwd *pw;
+
 	pid_t   pid;
+
 	int     add = 0, i;
 
 	for (i = 0; i <= 2; ++i)
@@ -236,12 +257,15 @@ main(int argc, const char *argv[])
 #ifdef	UTEMPTER_DEBUG
 		fprintf(stderr,
 			"utempter: cannot find valid user with uid=%u\n",
-			getuid());
+			(unsigned) getuid());
 #endif
 		exit(EXIT_FAILURE);
 	}
-
+#ifdef __sun
+	device = ttyname(STDIN_FILENO);
+#else
 	device = ptsname(STDIN_FILENO);
+#endif
 
 	if (!device)
 	{
@@ -255,7 +279,7 @@ main(int argc, const char *argv[])
 	validate_device(device);
 
 	return write_uwtmp_record(pw->pw_name, device + DEV_PREFIX_LEN, host,
-#ifdef __GLIBC__
+#if defined(__GLIBC__) || defined(__sun)
 				  pid,
 #endif
 				  add);
